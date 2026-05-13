@@ -1,0 +1,16 @@
+# datasets
+oxford_images/
+assignment_2/oxford_images/
+
+# model checkpoints
+*.pth
+saved_models/
+assignment_2/saved_models/
+
+# generated results
+results/
+assignment_2/results/
+
+# python
+__pycache__/
+*.pyc
