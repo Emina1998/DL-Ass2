@@ -1,50 +1,207 @@
 import os
+from pathlib import Path
+
 import torch
 import torchvision
 import torchvision.transforms.v2 as v2
-import os
 import matplotlib.pyplot as plt
 import numpy as np
-os.chdir(os.getcwd() + "change to your working directory if necessary")
-
 
 from train import OxfordPetsCustom
+from assignment_2_code.models.segment_model import DeepSegmenter
+from assignment_2_code.models.segformer import SegFormer
 
 
-def imshow(img, filename='img/test.png'):
-    npimg = img.numpy()
-    plt.imshow(np.transpose(npimg, (1, 2, 0)))
-    plt.imsave(filename,np.transpose(npimg, (1, 2, 0)))
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+
+DATASET_ROOT = "oxford_images"
+
+MODEL_PATHS = {
+    "scratch": "saved_models/oxford/from_scratch/SegFormer_model_best.pth",
+
+    "finetune_lr0.001":
+    "saved_models/oxford/finetune_lr0.001/SegFormer_model_best.pth",
+
+    "finetune_lr0.0005":
+    "saved_models/oxford/finetune_lr0.0005/SegFormer_model_best.pth",
+
+    "freeze_lr0.001":
+    "saved_models/oxford/freeze_lr0.001/SegFormer_model_best.pth",
+
+    "freeze_lr0.0005":
+    "saved_models/oxford/freeze_lr0.0005/SegFormer_model_best.pth"
+}
+
+OUTPUT_DIR = Path("results")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+IMAGE_SIZE = (64, 64)
+BATCH_SIZE = 8
 
 
-if __name__ == '__main__': 
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
 
-    train_transform = v2.Compose([v2.ToImage(), 
-                            v2.ToDtype(torch.float32, scale=True),
-                            v2.Resize(size=(64,64), interpolation=v2.InterpolationMode.NEAREST)])
+def save_grid_image(tensor, save_path):
+    """
+    Saves image grid from tensor.
+    """
 
-    train_transform2 = v2.Compose([v2.ToImage(), 
-                            v2.ToDtype(torch.long, scale=False),
-                            v2.Resize(size=(64,64), interpolation=v2.InterpolationMode.NEAREST)])
+    image = tensor.detach().cpu().numpy()
+    image = np.transpose(image, (1, 2, 0))
 
-    train_data = OxfordPetsCustom(root="change to the path were your dataset is stored", 
-                            split="trainval",
-                            target_types='segmentation', 
-                            transform=train_transform,
-                            target_transform=train_transform2,
-                            download=True)
-    train_data_loader = torch.utils.data.DataLoader(train_data,
-                                            batch_size=8,
-                                            shuffle=False,
-                                            num_workers=2)
+    plt.figure(figsize=(8, 8))
+    plt.imshow(image)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
 
-    # get some random training images
-    dataiter = iter(train_data_loader)
-    images, labels = next(dataiter)
-    images_plot = torchvision.utils.make_grid(images, nrow=4)
-    labels_plot = torchvision.utils.make_grid((labels-1)/2, nrow=4)#.to(torch.uint8)
 
-    # show/plot images
-    imshow(images_plot, filename="img/input_test_pets.png")
-    imshow(labels_plot,filename="img/seg_mask_test_pets.png")
+def build_dataloader():
 
+    image_transform = v2.Compose([
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Resize(IMAGE_SIZE)
+    ])
+
+    mask_transform = v2.Compose([
+        v2.ToImage(),
+        v2.ToDtype(torch.long, scale=False),
+        v2.Resize(
+            IMAGE_SIZE,
+            interpolation=v2.InterpolationMode.NEAREST
+        )
+    ])
+
+    dataset = OxfordPetsCustom(
+        root=DATASET_ROOT,
+        split="trainval",
+        target_types="segmentation",
+        transform=image_transform,
+        target_transform=mask_transform,
+        download=True
+    )
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2
+    )
+
+    return dataset, loader
+
+
+def load_model(model_path, num_classes, device):
+
+    model = DeepSegmenter(
+        SegFormer(num_classes=num_classes)
+    )
+
+    state_dict = torch.load(model_path, map_location=device)
+
+    model.net.load_state_dict(state_dict)
+
+    model.to(device)
+    model.eval()
+
+    return model
+
+
+def generate_predictions(model, images, device):
+
+    with torch.no_grad():
+
+        images = images.to(device)
+
+        outputs = model(images)
+
+        predictions = torch.argmax(outputs, dim=1)
+
+    return predictions.cpu()
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    dataset, loader = build_dataloader()
+
+    images, masks = next(iter(loader))
+
+    # -----------------------------------------------------
+    # SAVE INPUT IMAGES
+    # -----------------------------------------------------
+
+    image_grid = torchvision.utils.make_grid(
+        images,
+        nrow=4
+    )
+
+    save_grid_image(
+        image_grid,
+        OUTPUT_DIR / "input_images.png"
+    )
+
+    # -----------------------------------------------------
+    # SAVE GROUND TRUTH MASKS
+    # -----------------------------------------------------
+
+    normalized_masks = (masks - 1).float() / 2
+
+    mask_grid = torchvision.utils.make_grid(
+        normalized_masks,
+        nrow=4
+    )
+
+    save_grid_image(
+        mask_grid,
+        OUTPUT_DIR / "ground_truth_masks.png"
+    )
+
+    # -----------------------------------------------------
+    # RUN ALL MODELS
+    # -----------------------------------------------------
+
+    for model_name, model_path in MODEL_PATHS.items():
+
+        print(f"Running inference for: {model_name}")
+
+        model = load_model(
+            model_path=model_path,
+            num_classes=len(dataset.classes_seg),
+            device=device
+        )
+
+        predictions = generate_predictions(
+            model,
+            images,
+            device
+        )
+
+        prediction_grid = torchvision.utils.make_grid(
+            predictions.unsqueeze(1).float(),
+            nrow=4
+        )
+
+        prediction_grid = prediction_grid / prediction_grid.max()
+
+        save_grid_image(
+            prediction_grid,
+            OUTPUT_DIR / f"{model_name}_predictions.png"
+        )
+
+        print(f"Saved {model_name} predictions")
+
+    print("Visualization completed.")
